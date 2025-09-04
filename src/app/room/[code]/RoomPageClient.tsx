@@ -8,8 +8,15 @@ import SearchBar from "@/components/SearchBar";
 import VideoPlayer from "@/components/VideoPlayer";
 import { Button } from "@/components/ui/button";
 import { toast } from "react-hot-toast";
+import { v4 as uuid } from "uuid";
 
-type ChatMessage = { sender: string; content: string; createdAt?: string };
+type ChatMessage = {
+  id: string;
+  sender: string;
+  content: string;
+  createdAt: string;
+};
+
 type VideoItem = {
   id: { videoId: string };
   snippet: { title: string; channelTitle: string };
@@ -56,11 +63,11 @@ export default function RoomPageClient({
   const [onlineIds, setOnlineIds] = useState<string[]>([]);
   const isLeader = useMemo(() => {
     if (!onlineIds.length) return false;
-    const sorted = [...onlineIds].sort(); // lexicographic
+    const sorted = [...onlineIds].sort();
     return sorted[0] === clientId;
   }, [onlineIds, clientId]);
 
-  // player refs for sync math
+  // player refs
   const playerRef = useRef<any>(null);
   const isPlayingRef = useRef(false);
   const lastUpdatedMsRef = useRef<number>(Date.now());
@@ -90,7 +97,7 @@ export default function RoomPageClient({
     setClientId(getClientId());
   }, []);
 
-  // bump DB last_active (leader only to avoid write storms)
+  // bump DB last_active (leader only)
   const bumpLastActive = useCallback(async () => {
     if (!isLeader) return;
     await supabase
@@ -114,7 +121,6 @@ export default function RoomPageClient({
   useEffect(() => {
     if (!clientId || !code) return;
 
-    // create channel with presence + broadcast
     const ch = supabase.channel(`room:${code}`, {
       config: {
         presence: { key: clientId },
@@ -123,12 +129,13 @@ export default function RoomPageClient({
     });
     channelRef.current = ch;
 
-    // --- presence handling ---
+    // presence join
     ch.on("presence", { event: "join" }, ({ newPresences }) => {
       for (const p of newPresences) {
         if (p.clientId && p.name && p.clientId !== clientId) {
           setMessages((prev) => [
             {
+              id: uuid(),
               sender: "System",
               content: `${p.name} joined the room`,
               createdAt: new Date().toISOString(),
@@ -139,11 +146,13 @@ export default function RoomPageClient({
       }
     });
 
+    // presence leave
     ch.on("presence", { event: "leave" }, ({ leftPresences }) => {
       for (const p of leftPresences) {
         if (p.clientId && p.name && p.clientId !== clientId) {
           setMessages((prev) => [
             {
+              id: uuid(),
               sender: "System",
               content: `${p.name} left the room`,
               createdAt: new Date().toISOString(),
@@ -154,13 +163,12 @@ export default function RoomPageClient({
       }
     });
 
+    // presence sync
     ch.on("presence", { event: "sync" }, () => {
-      // state: Record<presenceKey, Array<meta>>
       const state = ch.presenceState() as Record<
         string,
         Array<{ clientId: string; name: string }>
       >;
-      // Collect unique clientIds
       const ids = Object.values(state)
         .flat()
         .map((m) => String(m.clientId))
@@ -168,23 +176,20 @@ export default function RoomPageClient({
       const unique = Array.from(new Set(ids));
       setOnlineIds(unique);
 
-      // leader flips is_active and bumps last_active
       setActiveFlag(unique.length > 0);
       bumpLastActive();
     });
 
-    // --- broadcast handling ---
+    // broadcast: chat
     ch.on("broadcast", { event: "chat" }, ({ payload }) => {
-      const { sender, content } = payload as {
-        sender: string;
-        content: string;
-      };
-      setMessages((prev) => [
-        { sender, content, createdAt: new Date().toISOString() },
-        ...prev,
-      ]);
+      const msg = payload as ChatMessage;
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === msg.id)) return prev; // dedup
+        return [msg, ...prev];
+      });
     });
 
+    // broadcast: rename
     ch.on("broadcast", { event: "rename" }, ({ payload }) => {
       const { oldName, newName } = payload as {
         oldName: string;
@@ -192,6 +197,7 @@ export default function RoomPageClient({
       };
       setMessages((prev) => [
         {
+          id: uuid(),
           sender: "System",
           content: `${oldName} changed their name to ${newName}`,
           createdAt: new Date().toISOString(),
@@ -201,6 +207,7 @@ export default function RoomPageClient({
       bumpLastActive();
     });
 
+    // broadcast: set-video
     ch.on("broadcast", { event: "set-video" }, ({ payload }) => {
       const { videoId } = payload as { videoId: string };
       setVideoId(videoId);
@@ -214,6 +221,7 @@ export default function RoomPageClient({
       bumpLastActive();
     });
 
+    // broadcast: playback
     ch.on("broadcast", { event: "playback" }, ({ payload }) => {
       const { isPlaying, currentTime } = payload as {
         isPlaying: boolean;
@@ -230,8 +238,8 @@ export default function RoomPageClient({
       bumpLastActive();
     });
 
+    // broadcast: state
     ch.on("broadcast", { event: "state" }, ({ payload }) => {
-      // authoritative sync from leader
       const { videoId, isPlaying, currentTime, at } = payload as {
         videoId: string | null;
         isPlaying: boolean;
@@ -258,10 +266,8 @@ export default function RoomPageClient({
     // subscribe
     ch.subscribe(async (status) => {
       if (status === "SUBSCRIBED") {
-        // announce our presence (includes our current name + clientId)
         await ch.track({ clientId, name: userName });
 
-        // ask for a state snapshot (leader will answer)
         ch.send({
           type: "broadcast",
           event: "request-state",
@@ -274,7 +280,6 @@ export default function RoomPageClient({
     ch.on("broadcast", { event: "request-state" }, async ({ payload }) => {
       if (!isLeader) return;
       const { requester } = payload as { requester: string };
-      // build snapshot
       const vid = videoIdRef.current;
       if (!vid) return;
       let currentTime = 0;
@@ -300,7 +305,7 @@ export default function RoomPageClient({
     };
   }, [code, clientId, userName, isLeader, bumpLastActive, setActiveFlag]);
 
-  // set video (broadcast)
+  // set video
   const handleSelectVideo = useCallback(
     (item: VideoItem) => {
       const vid = item.id.videoId;
@@ -328,7 +333,6 @@ export default function RoomPageClient({
         channel: item.snippet.channelTitle,
       });
 
-      // leader: bump DB activity
       supabase
         .from("rooms")
         .update({ last_active: new Date().toISOString() })
@@ -359,25 +363,27 @@ export default function RoomPageClient({
     });
   }, []);
 
-  // chat send (server-side name is authoritative via presence; we still include for perf)
+  // chat send (optimistic echo + dedup)
   const handleSendChat = useCallback(
     (m: { sender: string; content: string }) => {
       const content = (m?.content || "").trim();
       if (!content) return;
 
-      // optimistic local echo
-      setMessages((prev) => [
-        { sender: userName, content, createdAt: new Date().toISOString() },
-        ...prev,
-      ]);
+      const newMsg: ChatMessage = {
+        id: uuid(),
+        sender: userName,
+        content,
+        createdAt: new Date().toISOString(),
+      };
+
+      setMessages((prev) => [newMsg, ...prev]);
 
       channelRef.current?.send({
         type: "broadcast",
         event: "chat",
-        payload: { sender: userName, content },
+        payload: newMsg,
       });
 
-      // leader: bump activity
       supabase
         .from("rooms")
         .update({ last_active: new Date().toISOString() })
@@ -398,11 +404,9 @@ export default function RoomPageClient({
     setUserName(trimmed);
     localStorage.setItem(LS_ROOM_META, JSON.stringify({ name: trimmed }));
 
-    // update our presence meta (renames are presence updates)
     channelRef.current?.track({ clientId, name: trimmed });
 
     if (isChange) {
-      // broadcast a rename system message to avoid “racing with presence”
       channelRef.current?.send({
         type: "broadcast",
         event: "rename",
@@ -417,7 +421,7 @@ export default function RoomPageClient({
 
   return (
     <div className="flex flex-col md:flex-row h-dvh">
-      {/* Name modal on first visit */}
+      {/* Name modal */}
       {askName && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="bg-white dark:bg-[#111] p-6 rounded-xl shadow-xl max-w-sm w-full">
