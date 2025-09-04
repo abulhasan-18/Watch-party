@@ -1,4 +1,3 @@
-// src/app/room/[code]/page.tsx
 import { notFound } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import RoomPageClient from "./RoomPageClient";
@@ -6,9 +5,9 @@ import RoomPageClient from "./RoomPageClient";
 export default async function RoomPage({
   params,
 }: {
-  params: Promise<{ code: string }>; // 👈 Promise type
+  params: Promise<{ code: string }>;
 }) {
-  const { code } = await params; // 👈 await it here
+  const { code } = await params;
 
   const { data, error } = await supabase
     .from("rooms")
@@ -17,7 +16,7 @@ export default async function RoomPage({
     .maybeSingle();
 
   if (error || !data) {
-    notFound(); // triggers src/app/not-found.tsx
+    notFound();
   }
 
   return <RoomPageClient code={code} roomName={data.name} />;

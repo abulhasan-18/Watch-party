@@ -1,27 +1,36 @@
 "use client";
 
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { supabase } from "@/lib/supabase";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import ChatBox from "@/components/ChatBox";
 import SearchBar from "@/components/SearchBar";
 import VideoPlayer from "@/components/VideoPlayer";
-import { useEffect, useRef, useState, useCallback } from "react";
-import io, { Socket } from "socket.io-client";
 import { Button } from "@/components/ui/button";
 import { toast } from "react-hot-toast";
 
-let socket: Socket | null = null;
-
+type ChatMessage = { sender: string; content: string; createdAt?: string };
 type VideoItem = {
   id: { videoId: string };
-  snippet: {
-    title: string;
-    channelTitle: string;
-    thumbnails: { medium: { url: string } };
-  };
+  snippet: { title: string; channelTitle: string };
 };
 
-type ChatMessage = { sender: string; content: string; createdAt?: string };
-
 const LS_ROOM_META = "wp.roomMeta";
+
+// persistent client id across reloads/tabs
+function getClientId() {
+  if (typeof window === "undefined") return "";
+  const KEY = "wp.clientId";
+  let v = window.localStorage.getItem(KEY);
+  if (!v) {
+    v =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2);
+    window.localStorage.setItem(KEY, v);
+  }
+  return v;
+}
 
 export default function RoomPageClient({
   code,
@@ -30,161 +39,387 @@ export default function RoomPageClient({
   code: string;
   roomName: string;
 }) {
+  // UI state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [videoId, setVideoId] = useState<string | null>(null);
   const [nowPlaying, setNowPlaying] = useState<{
     title: string;
     channel: string;
   } | null>(null);
-  const [videoId, setVideoId] = useState<string | null>(null);
+
   const [userName, setUserName] = useState<string>("Guest");
   const [askName, setAskName] = useState(false);
   const [showChangeName, setShowChangeName] = useState(false);
   const [tempName, setTempName] = useState("");
 
-  const playerRef = useRef<any>(null);
+  const [clientId, setClientId] = useState("");
+  const [onlineIds, setOnlineIds] = useState<string[]>([]);
+  const isLeader = useMemo(() => {
+    if (!onlineIds.length) return false;
+    const sorted = [...onlineIds].sort(); // lexicographic
+    return sorted[0] === clientId;
+  }, [onlineIds, clientId]);
 
-  // 🔹 Load saved name
+  // player refs for sync math
+  const playerRef = useRef<any>(null);
+  const isPlayingRef = useRef(false);
+  const lastUpdatedMsRef = useRef<number>(Date.now());
+  const videoIdRef = useRef<string | null>(null);
+
+  // realtime channel
+  const channelRef = useRef<RealtimeChannel | null>(null);
+
+  // load saved display name
   useEffect(() => {
-    const raw = localStorage.getItem(LS_ROOM_META);
-    if (raw) {
-      try {
+    try {
+      const raw = localStorage.getItem(LS_ROOM_META);
+      if (raw) {
         const meta = JSON.parse(raw);
         if (meta?.name) setUserName(meta.name);
-      } catch {
+        else setAskName(true);
+      } else {
         setAskName(true);
       }
-    } else {
+    } catch {
       setAskName(true);
     }
   }, []);
 
-  // 🔹 Boot socket
+  // clientId once
   useEffect(() => {
-    if (!code) return;
-    if (socket) return;
+    setClientId(getClientId());
+  }, []);
 
-    fetch("/api/socket");
-    socket = io({ path: "/api/socket" });
+  // bump DB last_active (leader only to avoid write storms)
+  const bumpLastActive = useCallback(async () => {
+    if (!isLeader) return;
+    await supabase
+      .from("rooms")
+      .update({ last_active: new Date().toISOString() })
+      .eq("id", code);
+  }, [isLeader, code]);
 
-    socket.emit("join-room", code, userName);
+  const setActiveFlag = useCallback(
+    async (active: boolean) => {
+      if (!isLeader) return;
+      await supabase
+        .from("rooms")
+        .update({ is_active: active, last_active: new Date().toISOString() })
+        .eq("id", code);
+    },
+    [isLeader, code]
+  );
 
-    socket.on("init", (room: any) => {
-      setMessages(room.messages ?? []);
-      if (room.videoId && playerRef.current) {
-        const elapsed =
-          (Date.now() - (room.lastUpdatedMs || Date.now())) / 1000;
-        const startSeconds =
-          (room.startSeconds ?? room.currentTime ?? 0) + elapsed;
+  // subscribe to Supabase Realtime
+  useEffect(() => {
+    if (!clientId || !code) return;
 
-        setVideoId(room.videoId);
-        playerRef.current.loadVideoById({
-          videoId: room.videoId,
-          startSeconds,
-        });
+    // create channel with presence + broadcast
+    const ch = supabase.channel(`room:${code}`, {
+      config: {
+        presence: { key: clientId },
+        broadcast: { self: true },
+      },
+    });
+    channelRef.current = ch;
 
-        room.isPlaying
-          ? playerRef.current.playVideo()
-          : playerRef.current.pauseVideo();
-      } else {
-        setVideoId(null);
+    // --- presence handling ---
+    ch.on("presence", { event: "join" }, ({ newPresences }) => {
+      for (const p of newPresences) {
+        if (p.clientId && p.name && p.clientId !== clientId) {
+          setMessages((prev) => [
+            {
+              sender: "System",
+              content: `${p.name} joined the room`,
+              createdAt: new Date().toISOString(),
+            },
+            ...prev,
+          ]);
+        }
       }
     });
 
-    socket.on("set-video", (vid: string) => {
-      setVideoId(vid);
-      playerRef.current?.loadVideoById({ videoId: vid, startSeconds: 0 });
-      playerRef.current?.playVideo();
+    ch.on("presence", { event: "leave" }, ({ leftPresences }) => {
+      for (const p of leftPresences) {
+        if (p.clientId && p.name && p.clientId !== clientId) {
+          setMessages((prev) => [
+            {
+              sender: "System",
+              content: `${p.name} left the room`,
+              createdAt: new Date().toISOString(),
+            },
+            ...prev,
+          ]);
+        }
+      }
     });
 
-    socket.on("playback", ({ isPlaying, currentTime }) => {
-      if (!playerRef.current) return;
-      playerRef.current.seekTo(currentTime, true);
-      isPlaying
-        ? playerRef.current.playVideo()
-        : playerRef.current.pauseVideo();
+    ch.on("presence", { event: "sync" }, () => {
+      // state: Record<presenceKey, Array<meta>>
+      const state = ch.presenceState() as Record<
+        string,
+        Array<{ clientId: string; name: string }>
+      >;
+      // Collect unique clientIds
+      const ids = Object.values(state)
+        .flat()
+        .map((m) => String(m.clientId))
+        .filter(Boolean);
+      const unique = Array.from(new Set(ids));
+      setOnlineIds(unique);
+
+      // leader flips is_active and bumps last_active
+      setActiveFlag(unique.length > 0);
+      bumpLastActive();
     });
 
-    socket.on("chat", (m: ChatMessage) => setMessages((prev) => [m, ...prev]));
+    // --- broadcast handling ---
+    ch.on("broadcast", { event: "chat" }, ({ payload }) => {
+      const { sender, content } = payload as {
+        sender: string;
+        content: string;
+      };
+      setMessages((prev) => [
+        { sender, content, createdAt: new Date().toISOString() },
+        ...prev,
+      ]);
+    });
+
+    ch.on("broadcast", { event: "rename" }, ({ payload }) => {
+      const { oldName, newName } = payload as {
+        oldName: string;
+        newName: string;
+      };
+      setMessages((prev) => [
+        {
+          sender: "System",
+          content: `${oldName} changed their name to ${newName}`,
+          createdAt: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+      bumpLastActive();
+    });
+
+    ch.on("broadcast", { event: "set-video" }, ({ payload }) => {
+      const { videoId } = payload as { videoId: string };
+      setVideoId(videoId);
+      videoIdRef.current = videoId;
+      isPlayingRef.current = true;
+      lastUpdatedMsRef.current = Date.now();
+      if (playerRef.current) {
+        playerRef.current.loadVideoById({ videoId, startSeconds: 0 });
+        playerRef.current.playVideo();
+      }
+      bumpLastActive();
+    });
+
+    ch.on("broadcast", { event: "playback" }, ({ payload }) => {
+      const { isPlaying, currentTime } = payload as {
+        isPlaying: boolean;
+        currentTime: number;
+      };
+      isPlayingRef.current = isPlaying;
+      lastUpdatedMsRef.current = Date.now();
+      if (playerRef.current) {
+        playerRef.current.seekTo(currentTime, true);
+        isPlaying
+          ? playerRef.current.playVideo()
+          : playerRef.current.pauseVideo();
+      }
+      bumpLastActive();
+    });
+
+    ch.on("broadcast", { event: "state" }, ({ payload }) => {
+      // authoritative sync from leader
+      const { videoId, isPlaying, currentTime, at } = payload as {
+        videoId: string | null;
+        isPlaying: boolean;
+        currentTime: number;
+        at: number;
+      };
+      if (!videoId) return;
+      const elapsed = Math.max(0, (Date.now() - at) / 1000);
+      const start = (currentTime || 0) + (isPlaying ? elapsed : 0);
+
+      setVideoId(videoId);
+      videoIdRef.current = videoId;
+      isPlayingRef.current = isPlaying;
+      lastUpdatedMsRef.current = at;
+
+      if (playerRef.current) {
+        playerRef.current.loadVideoById({ videoId, startSeconds: start });
+        isPlaying
+          ? playerRef.current.playVideo()
+          : playerRef.current.pauseVideo();
+      }
+    });
+
+    // subscribe
+    ch.subscribe(async (status) => {
+      if (status === "SUBSCRIBED") {
+        // announce our presence (includes our current name + clientId)
+        await ch.track({ clientId, name: userName });
+
+        // ask for a state snapshot (leader will answer)
+        ch.send({
+          type: "broadcast",
+          event: "request-state",
+          payload: { requester: clientId },
+        });
+      }
+    });
+
+    // leader answers state requests
+    ch.on("broadcast", { event: "request-state" }, async ({ payload }) => {
+      if (!isLeader) return;
+      const { requester } = payload as { requester: string };
+      // build snapshot
+      const vid = videoIdRef.current;
+      if (!vid) return;
+      let currentTime = 0;
+      try {
+        currentTime = (await playerRef.current?.getCurrentTime()) || 0;
+      } catch {}
+      ch.send({
+        type: "broadcast",
+        event: "state",
+        payload: {
+          videoId: vid,
+          isPlaying: isPlayingRef.current,
+          currentTime,
+          at: Date.now(),
+          to: requester,
+        },
+      });
+    });
 
     return () => {
-      socket?.disconnect();
-      socket = null;
+      ch.unsubscribe();
+      channelRef.current = null;
     };
-  }, [code, userName]);
+  }, [code, clientId, userName, isLeader, bumpLastActive, setActiveFlag]);
 
-  // 🔹 Video handlers
+  // set video (broadcast)
   const handleSelectVideo = useCallback(
     (item: VideoItem) => {
-      if (!code) return;
       const vid = item.id.videoId;
       setVideoId(vid);
+      videoIdRef.current = vid;
+      isPlayingRef.current = true;
+      lastUpdatedMsRef.current = Date.now();
+
       playerRef.current?.loadVideoById({ videoId: vid, startSeconds: 0 });
       playerRef.current?.playVideo();
-      socket?.emit("set-video", { roomCode: code, videoId: vid });
-      socket?.emit("playback", {
-        roomCode: code,
-        isPlaying: true,
-        currentTime: 0,
+
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "set-video",
+        payload: { videoId: vid },
       });
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "playback",
+        payload: { isPlaying: true, currentTime: 0 },
+      });
+
       setNowPlaying({
         title: item.snippet.title,
         channel: item.snippet.channelTitle,
       });
+
+      // leader: bump DB activity
+      supabase
+        .from("rooms")
+        .update({ last_active: new Date().toISOString() })
+        .eq("id", code);
     },
     [code]
   );
 
   const handlePlay = useCallback(async () => {
-    if (!code) return;
-    const time = await playerRef.current?.getCurrentTime();
-    socket?.emit("playback", {
-      roomCode: code,
-      isPlaying: true,
-      currentTime: time,
+    const t = (await playerRef.current?.getCurrentTime()) || 0;
+    isPlayingRef.current = true;
+    lastUpdatedMsRef.current = Date.now();
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "playback",
+      payload: { isPlaying: true, currentTime: t },
     });
-  }, [code]);
+  }, []);
 
   const handlePause = useCallback(async () => {
-    if (!code) return;
-    const time = await playerRef.current?.getCurrentTime();
-    socket?.emit("playback", {
-      roomCode: code,
-      isPlaying: false,
-      currentTime: time,
+    const t = (await playerRef.current?.getCurrentTime()) || 0;
+    isPlayingRef.current = false;
+    lastUpdatedMsRef.current = Date.now();
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "playback",
+      payload: { isPlaying: false, currentTime: t },
     });
-  }, [code]);
+  }, []);
 
+  // chat send (server-side name is authoritative via presence; we still include for perf)
   const handleSendChat = useCallback(
-    (msg: { sender: string; content: string }) => {
-      if (!code) return;
-      socket?.emit("chat", { roomCode: code, ...msg });
+    (m: { sender: string; content: string }) => {
+      const content = (m?.content || "").trim();
+      if (!content) return;
+
+      // optimistic local echo
+      setMessages((prev) => [
+        { sender: userName, content, createdAt: new Date().toISOString() },
+        ...prev,
+      ]);
+
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "chat",
+        payload: { sender: userName, content },
+      });
+
+      // leader: bump activity
+      supabase
+        .from("rooms")
+        .update({ last_active: new Date().toISOString() })
+        .eq("id", code);
     },
-    [code]
+    [userName, code]
   );
 
-  // 🔹 Save name
+  // set/rename name
   const saveName = (newName: string, isChange = false) => {
-    if (!newName.trim()) {
+    const trimmed = newName.trim();
+    if (!trimmed) {
       toast.error("Please enter your name");
       return;
     }
-    setUserName(newName.trim());
-    localStorage.setItem(
-      LS_ROOM_META,
-      JSON.stringify({ name: newName.trim(), role: "guest" })
-    );
+
+    const old = userName;
+    setUserName(trimmed);
+    localStorage.setItem(LS_ROOM_META, JSON.stringify({ name: trimmed }));
+
+    // update our presence meta (renames are presence updates)
+    channelRef.current?.track({ clientId, name: trimmed });
+
     if (isChange) {
-      socket?.emit("change-name", { roomCode: code, newName: newName.trim() });
+      // broadcast a rename system message to avoid “racing with presence”
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "rename",
+        payload: { oldName: old, newName: trimmed },
+      });
+      toast.success("Name updated");
     }
+
     setAskName(false);
     setShowChangeName(false);
   };
 
   return (
     <div className="flex flex-col md:flex-row h-dvh">
-      {/* Ask name modal */}
+      {/* Name modal on first visit */}
       {askName && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/60 z-50">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="bg-white dark:bg-[#111] p-6 rounded-xl shadow-xl max-w-sm w-full">
             <h2 className="text-lg font-bold mb-3">Enter your name</h2>
             <input
@@ -200,13 +435,13 @@ export default function RoomPageClient({
 
       {/* Change name modal */}
       {showChangeName && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/60 z-50">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="bg-white dark:bg-[#111] p-6 rounded-xl shadow-xl max-w-sm w-full">
             <h2 className="text-lg font-bold mb-3">Change your name</h2>
             <input
               value={tempName}
               onChange={(e) => setTempName(e.target.value)}
-              placeholder="New Name"
+              placeholder="New name"
               className="w-full border px-3 py-2 rounded-lg mb-4"
             />
             <div className="flex gap-2">
@@ -228,8 +463,8 @@ export default function RoomPageClient({
         </div>
       )}
 
+      {/* Left: video + search */}
       <div className="flex-1 flex flex-col p-4 overflow-y-auto">
-        {/* Header */}
         <div className="mb-4 text-center">
           <h1 className="text-xl font-bold">{roomName}</h1>
           <div className="flex items-center justify-center gap-2 mt-2">
@@ -261,7 +496,7 @@ export default function RoomPageClient({
         </div>
 
         {videoId ? (
-          <div className="w-full aspect-video max-h-[65vh]">
+          <div className="w-full h-[70vh] max-w-6xl mx-auto">
             <VideoPlayer
               videoId={videoId}
               onReady={(p) => (playerRef.current = p)}
@@ -285,7 +520,7 @@ export default function RoomPageClient({
         <SearchBar onSelectVideo={handleSelectVideo} />
       </div>
 
-      {/* Chat */}
+      {/* Right: chat */}
       <ChatBox
         messages={messages}
         onSend={handleSendChat}
