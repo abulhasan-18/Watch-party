@@ -1,36 +1,65 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🌐 Strapi + Next.js Fullstack Project
 
-## Getting Started
+## 📖 Overview
+This project is a **full-stack web application** built with **Strapi** as the backend (Headless CMS) and **Next.js** as the frontend (React framework).  
+It demonstrates how to manage content in Strapi and render it dynamically in a Next.js frontend.
 
-First, run the development server:
+Initially, both backend and frontend ran **locally**, but later I migrated them to the **cloud**:
+- **Frontend** → Hosted on **Vercel**
+- **Backend** → Hosted on **Strapi Cloud (Free Trial)**
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+---
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## ⚙️ Tech Stack
+- **Frontend:** [Next.js](https://nextjs.org/) 🚀  
+- **Backend:** [Strapi](https://strapi.io/) 🖥️  
+- **Database:** Default Strapi DB / Configured DB  
+- **Deployment:**  
+  - Vercel (Frontend)  
+  - Strapi Cloud (Backend)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 🛠 Development Journey
+### 1. Local Setup
+- Created a **Strapi backend** to manage content.  
+- Built a **Next.js frontend** to fetch & display data via Strapi REST API/GraphQL.  
 
-## Learn More
+### 2. Cloud Migration
+- Deployed **frontend on Vercel** with automatic CI/CD from GitHub.  
+- Migrated **backend to Strapi Cloud (Free Trial)** for production hosting.  
 
-To learn more about Next.js, take a look at the following resources:
+### 3. Integration
+- Updated API calls in frontend → connected to **Strapi Cloud backend**.  
+- Verified smooth **end-to-end flow** in production.  
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 🚀 Deployment Links
+- 🔗 **Frontend (Next.js):** [Live Demo on Vercel](#)  
+- 🔗 **Backend (Strapi):** [Strapi Cloud Admin](#)  
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## ✨ Key Learnings
+- Setting up **Strapi + Next.js fullstack architecture**.  
+- Deploying frontend & backend on **different cloud providers**.  
+- Managing **CORS, environment variables, and API URLs** during migration.  
+- Building a setup that easily moves from **local development → production cloud**.  
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+## 📌 How to Run Locally
+1. **Clone repo**  
+   ```bash
+   git clone https://github.com/your-username/your-repo.git
+   cd your-repo
+
+   npm install   # for Next.js
+   cd backend && npm install   # for Strapi
+
+   # In /backend
+   npm run develop
+
+   # In /frontend
+   npm run dev
