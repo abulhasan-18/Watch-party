@@ -28,19 +28,20 @@ export default function JoinRoomPage() {
       const code = roomCode.trim().toUpperCase();
       const trimmedName = name.trim();
 
-      // Check if room exists in Supabase
-      const { data, error } = await supabase
-        .from("rooms")
-        .select("id, name")
-        .eq("id", code)
-        .maybeSingle();
+      let roomTitle = `Room ${code}`;
 
-      if (error) throw error;
+      try {
+        const { data } = await supabase
+          .from("rooms")
+          .select("id, name")
+          .ilike("id", code)
+          .maybeSingle();
 
-      if (!data) {
-        toast.error("No active room found with that code. Please check and try again.");
-        setLoading(false);
-        return;
+        if (data?.name) {
+          roomTitle = data.name;
+        }
+      } catch {
+        // Fallback gracefully
       }
 
       // Save user metadata
@@ -49,11 +50,11 @@ export default function JoinRoomPage() {
         JSON.stringify({
           role: "guest",
           name: trimmedName,
-          roomName: data.name,
+          roomName: roomTitle,
         })
       );
 
-      toast.success(`Joining room "${data.name}"… 🎉`);
+      toast.success(`Joining room "${roomTitle}"… 🎉`);
       router.push(`/room/${code}`);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : "Failed to join room. Please try again.";

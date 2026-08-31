@@ -40,7 +40,8 @@ type ChatMessage = {
 type PresenceUser = {
   clientId: string;
   name: string;
-  joinedAt?: string;
+  role?: "host" | "guest";
+  joinedAt?: number;
 };
 
 const LS_ROOM_META = "wp.roomMeta";
@@ -79,6 +80,7 @@ export default function RoomPageClient({
   } | null>(null);
 
   const [userName, setUserName] = useState<string>("Guest");
+  const [userRole, setUserRole] = useState<"host" | "guest">("guest");
   const [askName, setAskName] = useState(false);
   const [showChangeName, setShowChangeName] = useState(false);
   const [tempName, setTempName] = useState("");
@@ -86,7 +88,8 @@ export default function RoomPageClient({
   const [clientId, setClientId] = useState("");
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
   const [channelReady, setChannelReady] = useState(false);
-  const [leaderOnlyControl, setLeaderOnlyControl] = useState<boolean>(true);
+  // Default to false (Free control) so any user can control video without confusion, unless host locks it
+  const [leaderOnlyControl, setLeaderOnlyControl] = useState<boolean>(false);
 
   // Tabs: "chat" | "participants"
   const [sidebarTab, setSidebarTab] = useState<"chat" | "participants">("chat");
@@ -96,21 +99,24 @@ export default function RoomPageClient({
   // mobile chat drawer
   const [showChatMobile, setShowChatMobile] = useState(false);
 
-  // derived leader
-  const onlineIds = useMemo(
-    () => presenceUsers.map((u) => u.clientId).filter(Boolean),
-    [presenceUsers]
-  );
+  // Derived host determination
+  const hostUser = useMemo(() => {
+    const explicitHost = presenceUsers.find((u) => u.role === "host");
+    if (explicitHost) return explicitHost;
+    if (!presenceUsers.length) return null;
+    return [...presenceUsers].sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0))[0];
+  }, [presenceUsers]);
+
+  const isLeader = useMemo(() => {
+    if (userRole === "host") return true;
+    if (hostUser && hostUser.clientId === clientId) return true;
+    if (presenceUsers.length <= 1) return true;
+    return false;
+  }, [userRole, hostUser, clientId, presenceUsers.length]);
 
   const leaderId = useMemo(() => {
-    if (!onlineIds.length) return "";
-    return [...onlineIds].sort()[0] ?? "";
-  }, [onlineIds]);
-
-  const isLeader = useMemo(
-    () => Boolean(clientId && leaderId === clientId),
-    [clientId, leaderId]
-  );
+    return hostUser?.clientId || (isLeader ? clientId : "");
+  }, [hostUser, isLeader, clientId]);
 
   // player refs / sync
   const videoPlayerRef = useRef<VideoPlayerHandle | null>(null);
@@ -128,7 +134,7 @@ export default function RoomPageClient({
   const pendingChatRef = useRef<ChatMessage[]>([]);
   const chatTimestampsRef = useRef<number[]>([]);
 
-  // ===== Load saved display name =====
+  // ===== Load saved display name & role =====
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_ROOM_META);
@@ -136,6 +142,7 @@ export default function RoomPageClient({
         const meta = JSON.parse(raw);
         if (meta?.name) setUserName(String(meta.name).slice(0, 40));
         else setAskName(true);
+        if (meta?.role === "host") setUserRole("host");
       } else {
         setAskName(true);
       }
@@ -237,7 +244,7 @@ export default function RoomPageClient({
     ch.on("presence", { event: "sync" }, () => {
       const state = ch.presenceState() as Record<
         string,
-        Array<{ clientId: string; name: string }>
+        Array<{ clientId: string; name: string; role?: "host" | "guest"; joinedAt?: number }>
       >;
       const userList: PresenceUser[] = [];
       const seen = new Set<string>();
@@ -249,6 +256,8 @@ export default function RoomPageClient({
             userList.push({
               clientId: user.clientId,
               name: user.name || "Guest",
+              role: user.role || "guest",
+              joinedAt: user.joinedAt || 0,
             });
           }
         }
@@ -277,6 +286,12 @@ export default function RoomPageClient({
       bumpLastActive();
     });
 
+    // control permission mode sync
+    ch.on("broadcast", { event: "control-mode" }, ({ payload }) => {
+      const { leaderOnlyControl: mode } = payload as { leaderOnlyControl: boolean };
+      setLeaderOnlyControl(mode);
+    });
+
     // set video
     ch.on("broadcast", { event: "set-video" }, ({ payload }) => {
       const { videoId: newVid, senderId, title, channel } = payload as {
@@ -285,7 +300,7 @@ export default function RoomPageClient({
         title?: string;
         channel?: string;
       };
-      if (leaderOnlyControl && senderId && senderId !== leaderId) return;
+      if (leaderOnlyControl && senderId && senderId !== leaderId && !isLeader) return;
 
       isRemoteActionRef.current = true;
       setVideoId(newVid);
@@ -315,7 +330,7 @@ export default function RoomPageClient({
       };
 
       // Suppress if leader only and sender is not leader
-      if (leaderOnlyControl && senderId && senderId !== leaderId) return;
+      if (leaderOnlyControl && senderId && senderId !== leaderId && !isLeader) return;
 
       // Don't re-trigger from own broadcast
       if (senderId === clientId) return;
@@ -341,7 +356,7 @@ export default function RoomPageClient({
 
     // state reply for late joiners
     ch.on("broadcast", { event: "state" }, ({ payload }) => {
-      const { videoId: syncVid, isPlaying, currentTime, at, to, title, channel } = payload as {
+      const { videoId: syncVid, isPlaying, currentTime, at, to, title, channel, leaderOnlyControl: syncControl } = payload as {
         videoId: string | null;
         isPlaying: boolean;
         currentTime: number;
@@ -349,8 +364,12 @@ export default function RoomPageClient({
         to?: string;
         title?: string;
         channel?: string;
+        leaderOnlyControl?: boolean;
       };
       if (to && to !== clientId) return;
+      if (typeof syncControl === "boolean") {
+        setLeaderOnlyControl(syncControl);
+      }
       if (!syncVid) return;
 
       const elapsed = Math.max(0, (Date.now() - at) / 1000);
@@ -400,6 +419,7 @@ export default function RoomPageClient({
           to: requester || undefined,
           title: nowPlaying?.title,
           channel: nowPlaying?.channel,
+          leaderOnlyControl,
         },
       });
     });
@@ -409,7 +429,12 @@ export default function RoomPageClient({
       if (status === "SUBSCRIBED") {
         setChannelReady(true);
         const clean = sanitizeName(userName);
-        await ch.track({ clientId, name: clean });
+        await ch.track({
+          clientId,
+          name: clean,
+          role: userRole,
+          joinedAt: Date.now(),
+        });
         ch.send({
           type: "broadcast",
           event: "request-state",
@@ -427,7 +452,7 @@ export default function RoomPageClient({
       channelRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [code, clientId, leaderId, leaderOnlyControl, userName, enqueueSystem]);
+  }, [code, clientId, leaderId, leaderOnlyControl, userName, userRole, isLeader, enqueueSystem]);
 
   // leader heartbeat
   useEffect(() => {
@@ -465,8 +490,8 @@ export default function RoomPageClient({
     activeTimer = setInterval(tickActive, ACTIVE_PING_MS);
 
     return () => {
-      clearInterval(syncTimer);
-      clearInterval(activeTimer);
+      if (syncTimer) clearInterval(syncTimer);
+      if (activeTimer) clearInterval(activeTimer);
     };
   }, [isLeader, bumpLastActive, setActiveFlag, clientId]);
 
@@ -488,10 +513,29 @@ export default function RoomPageClient({
   }, [isLeader, clientId]);
 
   // ===== Actions =====
+  const toggleLeaderOnlyControl = () => {
+    if (!isLeader) {
+      toast.error("Only the room host can change control permissions.");
+      return;
+    }
+    const nextMode = !leaderOnlyControl;
+    setLeaderOnlyControl(nextMode);
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "control-mode",
+      payload: { leaderOnlyControl: nextMode, senderId: clientId },
+    });
+    toast(
+      nextMode
+        ? "Host Control: Only the host can play/pause or change video 🔒"
+        : "Free Control: Anyone can play/pause or change video 🔓"
+    );
+  };
+
   const handleSelectVideo = useCallback(
     (item: VideoItem) => {
       if (leaderOnlyControl && !isLeader) {
-        toast("Only the host can change video right now.", {
+        toast("Room is in Host-Only control mode. Ask the host to change video or switch to Anyone mode.", {
           icon: "🔒",
         });
         return;
@@ -550,7 +594,7 @@ export default function RoomPageClient({
     }
 
     if (leaderOnlyControl && !isLeader) {
-      toast("Only the host can control playback.", { icon: "🔒" });
+      toast("Room is in Host-Only control mode.", { icon: "🔒" });
       return;
     }
 
@@ -580,7 +624,7 @@ export default function RoomPageClient({
     }
 
     if (leaderOnlyControl && !isLeader) {
-      toast("Only the host can control playback.", { icon: "🔒" });
+      toast("Room is in Host-Only control mode.", { icon: "🔒" });
       return;
     }
 
@@ -650,10 +694,18 @@ export default function RoomPageClient({
 
     const old = userName;
     setUserName(trimmed);
-    localStorage.setItem(LS_ROOM_META, JSON.stringify({ name: trimmed }));
+    localStorage.setItem(
+      LS_ROOM_META,
+      JSON.stringify({ name: trimmed, role: userRole, roomName })
+    );
 
     try {
-      channelRef.current?.track({ clientId, name: trimmed });
+      channelRef.current?.track({
+        clientId,
+        name: trimmed,
+        role: userRole,
+        joinedAt: Date.now(),
+      });
     } catch {}
 
     if (isChange) {
@@ -749,7 +801,7 @@ export default function RoomPageClient({
                   <Crown className="w-3 h-3 text-amber-400" />
                   Host:{" "}
                   <span className="font-semibold text-slate-200">
-                    {isLeader ? "You" : presenceUsers.find((u) => u.clientId === leaderId)?.name || "Host"}
+                    {isLeader ? "You" : hostUser?.name || "Host"}
                   </span>
                 </span>
               </div>
@@ -760,17 +812,11 @@ export default function RoomPageClient({
           <div className="flex items-center gap-2">
             {/* Host Only Toggle */}
             <button
-              onClick={() => {
-                if (!isLeader) {
-                  toast.error("Only the host can toggle playback permissions.");
-                  return;
-                }
-                setLeaderOnlyControl((v) => !v);
-              }}
+              onClick={toggleLeaderOnlyControl}
               title={
                 leaderOnlyControl
-                  ? "Host-Only Control: Only host can play/pause/change video"
-                  : "Free Control: Anyone can play/pause/change video"
+                  ? "Host-Only Control: Only host can play/pause/change video (Click to allow anyone)"
+                  : "Free Control: Anyone can play/pause/change video (Click to lock to host)"
               }
               className={`hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition ${
                 leaderOnlyControl
@@ -784,7 +830,7 @@ export default function RoomPageClient({
                 </>
               ) : (
                 <>
-                  <Unlock className="w-3.5 h-3.5" /> Anyone Control
+                  <Unlock className="w-3.5 h-3.5 text-emerald-400" /> Anyone Can Control
                 </>
               )}
             </button>
@@ -935,6 +981,11 @@ export default function RoomPageClient({
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10 bg-slate-950/20 text-xs">
               <span className="text-slate-400">
                 You are: <strong className="text-slate-200 font-semibold">{userName}</strong>
+                {isLeader && (
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 font-bold">
+                    HOST
+                  </span>
+                )}
               </span>
               <button
                 onClick={() => {

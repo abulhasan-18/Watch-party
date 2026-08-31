@@ -40,23 +40,27 @@ export default function JoinRoomModal({
       const id = jRoomId.trim().toUpperCase();
       const trimmedName = jName.trim();
 
-      const { data, error } = await supabase
-        .from("rooms")
-        .select("id, name")
-        .eq("id", id)
-        .maybeSingle();
+      let roomTitle = `Room ${id}`;
 
-      if (error) throw error;
-      if (!data) {
-        toast.error("No active room found with that code.");
-        return;
+      try {
+        const { data } = await supabase
+          .from("rooms")
+          .select("id, name")
+          .ilike("id", id)
+          .maybeSingle();
+
+        if (data?.name) {
+          roomTitle = data.name;
+        }
+      } catch {
+        // Fallback gracefully
       }
 
       localStorage.setItem(
         LS_ROOM_META,
-        JSON.stringify({ role: "guest", name: trimmedName, roomName: data.name })
+        JSON.stringify({ role: "guest", name: trimmedName, roomName: roomTitle })
       );
-      toast.success(`Joining "${data.name}"… 🎉`);
+      toast.success(`Joining "${roomTitle}"… 🎉`);
       router.push(`/room/${id}`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to join room.";

@@ -22,7 +22,8 @@ if (
     });
   } catch {
     // If not configurable, assign directly
-    (globalThis as any).localStorage = {
+    const target = globalThis as Record<string, unknown>;
+    target.localStorage = {
       getItem: (key: string) => store.get(key) ?? null,
       setItem: (key: string, value: string) => store.set(key, String(value)),
       removeItem: (key: string) => store.delete(key),

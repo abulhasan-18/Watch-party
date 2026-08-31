@@ -1,4 +1,3 @@
-import { notFound } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import RoomPageClient from "./RoomPageClient";
 
@@ -8,16 +7,23 @@ export default async function RoomPage({
   params: Promise<{ code: string }>;
 }) {
   const { code } = await params;
+  const upperCode = (code || "").toUpperCase();
 
-  const { data, error } = await supabase
-    .from("rooms")
-    .select("name")
-    .eq("id", code)
-    .maybeSingle();
+  let roomName = `Room ${upperCode}`;
 
-  if (error || !data) {
-    notFound();
+  try {
+    const { data } = await supabase
+      .from("rooms")
+      .select("name")
+      .ilike("id", upperCode)
+      .maybeSingle();
+
+    if (data?.name) {
+      roomName = data.name;
+    }
+  } catch {
+    // If DB is offline or table is unconfigured, room still connects via Realtime WebSockets
   }
 
-  return <RoomPageClient code={code} roomName={data.name} />;
+  return <RoomPageClient code={upperCode} roomName={roomName} />;
 }

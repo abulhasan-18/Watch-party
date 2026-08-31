@@ -50,17 +50,27 @@ export default function CreateRoomModal({
       const trimmedName = cName.trim();
       const trimmedRoom = cRoomName.trim();
 
-      const { error } = await supabase.from("rooms").insert([
-        {
-          id,
-          name: trimmedRoom,
-          host_name: trimmedName,
-          is_active: true,
-          last_active: new Date().toISOString(),
-        },
-      ]);
+      localStorage.setItem(
+        LS_ROOM_META,
+        JSON.stringify({
+          role: "host",
+          name: trimmedName,
+          roomName: trimmedRoom,
+        })
+      );
 
-      if (error) throw error;
+      try {
+        await supabase.from("rooms").insert([
+          {
+            id,
+            name: trimmedRoom,
+            host_name: trimmedName,
+          },
+        ]);
+      } catch (insertErr) {
+        console.warn("Supabase rooms table insert:", insertErr);
+      }
+
       setCreatedRoomId(id);
       toast.success("Watch room created! 🎉");
     } catch (e: unknown) {

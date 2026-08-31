@@ -32,18 +32,6 @@ export default function CreateRoomPage() {
       const trimmedName = name.trim();
       const trimmedRoomName = roomName.trim();
 
-      const { error } = await supabase.from("rooms").insert([
-        {
-          id,
-          name: trimmedRoomName,
-          host_name: trimmedName,
-          is_active: true,
-          last_active: new Date().toISOString(),
-        },
-      ]);
-
-      if (error) throw error;
-
       localStorage.setItem(
         LS_ROOM_META,
         JSON.stringify({
@@ -52,6 +40,18 @@ export default function CreateRoomPage() {
           roomName: trimmedRoomName,
         })
       );
+
+      try {
+        await supabase.from("rooms").insert([
+          {
+            id,
+            name: trimmedRoomName,
+            host_name: trimmedName,
+          },
+        ]);
+      } catch (insertErr) {
+        console.warn("Supabase rooms insert:", insertErr);
+      }
 
       setCreatedRoomId(id);
       toast.success("Watch room created successfully! 🎉");
