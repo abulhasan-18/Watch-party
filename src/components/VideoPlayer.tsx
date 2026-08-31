@@ -8,7 +8,7 @@ import React, {
   useCallback,
   useState,
 } from "react";
-import YouTube, { YouTubeProps } from "react-youtube";
+import YouTube, { YouTubeProps, YouTubePlayer, YouTubeEvent } from "react-youtube";
 
 export type VideoPlayerHandle = {
   play: () => Promise<void>;
@@ -20,12 +20,7 @@ export type VideoPlayerHandle = {
     autoPlay?: boolean
   ) => Promise<void>;
   getCurrentTime: () => Promise<number>;
-  getPlayer: () => any | null;
-  /**
-   * latency-aware sync:
-   * apply remote {isPlaying, currentTime, atMillis} from a leader.
-   * will compensate for network delay: target = currentTime + (isPlaying ? (now - at)/1000 : 0)
-   */
+  getPlayer: () => YouTubePlayer | null;
   syncTo: (state: {
     isPlaying: boolean;
     currentTime: number;
@@ -35,12 +30,12 @@ export type VideoPlayerHandle = {
 
 type Props = {
   videoId: string;
-  onReady?: (player: any) => void;
+  onReady?: (player: YouTubePlayer) => void;
   onPlay?: () => void;
   onPause?: () => void;
   onEnded?: () => void;
   onBuffer?: () => void;
-  onError?: (err: any) => void;
+  onError?: (err: YouTubeEvent) => void;
   onStateChange?: (state: number) => void;
   /** called periodically while playing (≈4 times/sec) */
   onTime?: (t: number) => void;
@@ -81,31 +76,70 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   },
   ref
 ) {
-  const playerRef = useRef<any>(null);
+  const playerRef = useRef<YouTubePlayer | null>(null);
   const readyRef = useRef(false);
   const pendingLoadRef = useRef<{
     id: string;
     start: number;
     auto: boolean;
   } | null>(null);
-  const progressTimerRef = useRef<any>(null);
+  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastEmittedTimeRef = useRef(0);
   const [localVideoId, setLocalVideoId] = useState(videoId);
 
-  // keep local state in sync but don’t thrash the player before ready
+  // safe wrappers
+  const safePlay = useCallback(async () => {
+    try {
+      await playerRef.current?.playVideo();
+    } catch {}
+  }, []);
+
+  const safePause = useCallback(async () => {
+    try {
+      await playerRef.current?.pauseVideo();
+    } catch {}
+  }, []);
+
+  const safeSeek = useCallback(async (sec: number, allowSeekAhead = true) => {
+    try {
+      await playerRef.current?.seekTo(sec, allowSeekAhead);
+    } catch {}
+  }, []);
+
+  const safeLoad = useCallback(async (id: string, start = 0, auto = true) => {
+    if (!playerRef.current) {
+      pendingLoadRef.current = { id, start, auto };
+      return;
+    }
+    try {
+      await playerRef.current.loadVideoById({
+        videoId: id,
+        startSeconds: start,
+      });
+      if (auto) await playerRef.current.playVideo();
+    } catch {}
+  }, []);
+
+  const safeGetTime = useCallback(async () => {
+    try {
+      return (await playerRef.current?.getCurrentTime()) || 0;
+    } catch {
+      return 0;
+    }
+  }, []);
+
+  // keep local state in sync
   useEffect(() => {
     if (videoId === localVideoId) return;
     setLocalVideoId(videoId);
-    // if ready, load immediately; else queue it
     if (readyRef.current && playerRef.current) {
       safeLoad(videoId, 0, autoPlay);
     } else {
       pendingLoadRef.current = { id: videoId, start: 0, auto: autoPlay };
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoId]);
+  }, [videoId, localVideoId, autoPlay, safeLoad]);
 
-  // visibility: reduce quality when hidden, restore on visible
+  // visibility quality optimization
   useEffect(() => {
     const onVis = () => {
       const p = playerRef.current;
@@ -122,14 +156,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
-  // progress timer (fires while playing)
+  // progress timer
   const startProgress = useCallback(() => {
     if (progressTimerRef.current) return;
     progressTimerRef.current = setInterval(async () => {
       if (!playerRef.current || !onTime) return;
       try {
         const t = (await playerRef.current.getCurrentTime()) || 0;
-        // throttle to ~4Hz emissions (interval may drift)
         if (Math.abs(t - lastEmittedTimeRef.current) >= 0.2) {
           lastEmittedTimeRef.current = t;
           onTime(t);
@@ -145,57 +178,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
     }
   }, []);
 
-  // safe wrappers
-  const safePlay = useCallback(async () => {
-    try {
-      await playerRef.current?.playVideo();
-    } catch {}
-  }, []);
-  const safePause = useCallback(async () => {
-    try {
-      await playerRef.current?.pauseVideo();
-    } catch {}
-  }, []);
-  const safeSeek = useCallback(async (sec: number, allowSeekAhead = true) => {
-    try {
-      await playerRef.current?.seekTo(sec, allowSeekAhead);
-    } catch {}
-  }, []);
-  const safeLoad = useCallback(async (id: string, start = 0, auto = true) => {
-    if (!playerRef.current) {
-      // queue until ready
-      pendingLoadRef.current = { id, start, auto };
-      return;
-    }
-    try {
-      await playerRef.current.loadVideoById({
-        videoId: id,
-        startSeconds: start,
-      });
-      if (auto) await playerRef.current.playVideo();
-    } catch {}
-  }, []);
-  const safeGetTime = useCallback(async () => {
-    try {
-      return (await playerRef.current?.getCurrentTime()) || 0;
-    } catch {
-      return 0;
-    }
-  }, []);
-
   // YouTube callbacks
   const handleReady: YouTubeProps["onReady"] = (e) => {
     playerRef.current = e.target;
     readyRef.current = true;
 
-    // apply queued load if any
     if (pendingLoadRef.current) {
       const { id, start, auto } = pendingLoadRef.current;
       pendingLoadRef.current = null;
       safeLoad(id, start, auto);
     } else {
-      // initial load for SSR -> CSR hydration
-      // react-youtube already loads by `videoId`, but ensure autoplay/startSeconds
       if (autoPlay && startSeconds > 0) {
         safeSeek(startSeconds);
         safePlay();
@@ -218,7 +210,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
       stopProgress();
       onPause?.();
     } else if (s === YTState.BUFFERING) {
-      // don’t spam onBuffer; it’s noisy, but useful.
       onBuffer?.();
     } else if (s === YTState.ENDED) {
       stopProgress();
@@ -227,7 +218,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
   };
 
   const handleError: YouTubeProps["onError"] = (e) => {
-    // provide the raw error for upstream to toast/log
     onError?.(e);
   };
 
@@ -258,15 +248,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
         <YouTube
           videoId={localVideoId}
           onReady={handleReady}
-          onPlay={() => {
-            /* handled in onStateChange */
-          }}
-          onPause={() => {
-            /* handled in onStateChange */
-          }}
-          onEnd={() => {
-            /* handled in onStateChange */
-          }}
+          onPlay={() => {}}
+          onPause={() => {}}
+          onEnd={() => {}}
           onStateChange={handleStateChange}
           onError={handleError}
           className="absolute top-0 left-0 w-full h-full"

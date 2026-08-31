@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Send, Copy, Check, MessageSquare } from "lucide-react";
 
 export type Message = {
   id?: string;
@@ -14,17 +15,14 @@ type Props = {
   messages: Message[];
   onSend: (m: { sender: string; content: string }) => void;
   userName: string;
-  /** If your list is newest-first (your current setup), leave true. If oldest-first, set false. */
   messagesNewestFirst?: boolean;
-  /** Optional typing indicator names */
   typingUsers?: string[];
-  /** Optional outer className */
   className?: string;
-  /** Max chars in input before warning (soft) */
   maxChars?: number;
-  /** Called on user typing (to emit presence typing) */
   onTyping?: (isTyping: boolean) => void;
 };
+
+const QUICK_REACTIONS = ["🍿", "🔥", "❤️", "👏", "😂", "🎉", "😱", "🥳"];
 
 export default function ChatBox({
   messages,
@@ -38,24 +36,23 @@ export default function ChatBox({
 }: Props) {
   const [msg, setMsg] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const typingTimerRef = useRef<any>(null);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // normalize order for rendering
+  // normalize order for rendering (oldest first at top, newest at bottom)
   const ordered = useMemo(() => {
     if (!messages?.length) return [];
     return messagesNewestFirst ? [...messages].reverse() : messages;
   }, [messages, messagesNewestFirst]);
 
-  // auto-scroll to bottom when new messages arrive (respect user if near bottom)
+  // auto-scroll to bottom when new messages arrive
   useEffect(() => {
     const el = listRef.current;
     if (!el) return;
-    // if we’re within 120px of bottom, snap to bottom on new message
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
     if (nearBottom) {
-      // next tick so DOM paints first
       requestAnimationFrame(() => {
         el.scrollTop = el.scrollHeight;
       });
@@ -67,46 +64,53 @@ export default function ChatBox({
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "0px";
-    const h = Math.min(160, el.scrollHeight);
-    el.style.height = h + "px";
+    const h = Math.min(120, el.scrollHeight);
+    el.style.height = Math.max(38, h) + "px";
   }, [msg]);
 
   // typing notifier (debounced)
   useEffect(() => {
     if (!onTyping) return;
     if (!isTyping) return;
-    clearTimeout(typingTimerRef.current);
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     typingTimerRef.current = setTimeout(() => {
       setIsTyping(false);
       onTyping(false);
     }, 1500);
-    return () => clearTimeout(typingTimerRef.current);
+    return () => {
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    };
   }, [isTyping, onTyping, msg]);
 
-  const send = () => {
-    const content = msg.trim();
+  const send = (customText?: string) => {
+    const content = (customText !== undefined ? customText : msg).trim();
     if (!content) return;
     onSend({ sender: userName || "Guest", content });
-    setMsg("");
+    if (customText === undefined) {
+      setMsg("");
+    }
     setIsTyping(false);
     onTyping?.(false);
     inputRef.current?.focus();
   };
 
-  // color hash for username (stable)
+  const handleCopyMessage = async (id: string, text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 1500);
+  };
+
+  // color hash for username
   const getUserColor = (name: string) => {
     const palette = [
-      "bg-pink-600",
-      "bg-blue-600",
-      "bg-green-600",
-      "bg-yellow-600",
-      "bg-purple-600",
-      "bg-amber-600",
-      "bg-rose-600",
-      "bg-sky-600",
-      "bg-teal-600",
-      "bg-indigo-600",
-    ] as const;
+      "from-pink-500 to-rose-600",
+      "from-blue-500 to-indigo-600",
+      "from-emerald-500 to-teal-600",
+      "from-amber-500 to-orange-600",
+      "from-purple-500 to-fuchsia-600",
+      "from-cyan-500 to-sky-600",
+      "from-violet-500 to-purple-600",
+    ];
     const sum = [...name].reduce((a, c) => a + c.charCodeAt(0), 0);
     return palette[sum % palette.length];
   };
@@ -123,10 +127,12 @@ export default function ChatBox({
 
   const fmtTime = (iso?: string) => {
     if (!iso) return "";
-    const d = new Date(iso);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    return `${hh}:${mm}`;
+    try {
+      const d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } catch {
+      return "";
+    }
   };
 
   const overLimit = msg.length > maxChars;
@@ -135,68 +141,52 @@ export default function ChatBox({
   return (
     <div
       className={
-        "w-full md:w-96 border-t md:border-t-0 md:border-l border-slate-200 dark:border-slate-800 flex flex-col bg-white dark:bg-[#111] " +
-        className
+        "flex flex-col h-full bg-slate-900/90 text-slate-100 " + className
       }
     >
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-        <div className="flex items-center gap-2 min-w-0">
-          <div
-            className={`w-8 h-8 rounded-full text-white grid place-items-center text-xs ${getUserColor(
-              userName || "Guest"
-            )}`}
-          >
-            {initials(userName || "G")}
-          </div>
-          <div className="truncate">
-            <div className="text-sm font-semibold truncate">
-              {userName || "Guest"}
+      {/* Messages Scroll Area */}
+      <div
+        ref={listRef}
+        className="flex-1 overflow-y-auto p-4 space-y-3.5 scrollbar-thin scrollbar-thumb-white/10"
+      >
+        {ordered.length === 0 ? (
+          <div className="h-full min-h-[220px] flex flex-col items-center justify-center text-center p-6 text-slate-400">
+            <div className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-slate-400 mb-3">
+              <MessageSquare className="w-6 h-6" />
             </div>
-            <div className="text-[11px] text-slate-500 dark:text-slate-400">
-              Press Enter to send · Shift+Enter for newline
-            </div>
+            <p className="text-sm font-semibold text-slate-300">Room Chat</p>
+            <p className="text-xs text-slate-500 mt-1 max-w-[200px]">
+              Be the first to say hi or react with emojis!
+            </p>
           </div>
-        </div>
-        {/* Copy all (optional UX) */}
-        <button
-          className="text-xs px-2 py-1 rounded border hover:bg-slate-50 dark:hover:bg-slate-900"
-          onClick={() => {
-            const text = ordered
-              .map((m) => `[${fmtTime(m.createdAt)}] ${m.sender}: ${m.content}`)
-              .join("\n");
-            navigator.clipboard.writeText(text);
-          }}
-          title="Copy chat"
-        >
-          Copy
-        </button>
-      </div>
+        ) : (
+          ordered.map((m, i) => {
+            const isMe = m.sender === userName;
+            const messageId = m.id || String(i);
 
-      {/* Messages */}
-      <div ref={listRef} className="flex-1 overflow-y-auto p-4 space-y-3">
-        {ordered.map((m, i) =>
-          m.kind === "system" || m.sender.toLowerCase() === "system" ? (
-            <div
-              key={m.id ?? i}
-              className="text-center text-[11px] text-slate-500 italic select-none"
-            >
-              {m.content}
-            </div>
-          ) : (
-            <div
-              key={m.id ?? i}
-              className={`flex ${
-                m.sender === userName ? "justify-end" : "justify-start"
-              }`}
-            >
-              <div className="flex items-end gap-2 max-w-[80%]">
-                {/* Avatar on left for others */}
-                {m.sender !== userName && (
+            if (m.kind === "system" || m.sender.toLowerCase() === "system") {
+              return (
+                <div
+                  key={messageId}
+                  className="flex items-center justify-center my-2"
+                >
+                  <span className="px-3 py-1 rounded-full text-[11px] font-medium bg-white/5 border border-white/10 text-slate-400">
+                    {m.content}
+                  </span>
+                </div>
+              );
+            }
+
+            return (
+              <div
+                key={messageId}
+                className={`flex gap-2.5 ${isMe ? "justify-end" : "justify-start"}`}
+              >
+                {!isMe && (
                   <div
-                    className={`w-7 h-7 rounded-full text-white grid place-items-center text-[10px] flex-shrink-0 ${getUserColor(
+                    className={`w-7 h-7 rounded-full bg-gradient-to-tr ${getUserColor(
                       m.sender
-                    )}`}
+                    )} text-white font-bold grid place-items-center text-[10px] shrink-0 shadow-sm`}
                     title={m.sender}
                   >
                     {initials(m.sender)}
@@ -204,75 +194,94 @@ export default function ChatBox({
                 )}
 
                 <div
-                  className={`group px-3 py-2 rounded-2xl shadow-sm ${
-                    m.sender === userName
-                      ? "bg-pink-600 text-white rounded-br-sm"
-                      : "bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-bl-sm"
+                  className={`group relative max-w-[82%] px-3.5 py-2.5 rounded-2xl shadow-sm transition-all ${
+                    isMe
+                      ? "bg-gradient-to-r from-pink-600 to-rose-600 text-white rounded-br-xs"
+                      : "bg-slate-800/90 border border-white/10 text-slate-100 rounded-bl-xs"
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <p
-                      className={`text-[11px] font-semibold leading-none ${
-                        m.sender === userName ? "opacity-90" : "opacity-80"
+                  <div className="flex items-center gap-2 mb-1">
+                    <span
+                      className={`text-[11px] font-semibold tracking-tight ${
+                        isMe ? "text-pink-100" : "text-slate-300"
                       }`}
                     >
-                      {m.sender === userName ? "You" : m.sender}
-                    </p>
+                      {isMe ? "You" : m.sender}
+                    </span>
                     {m.createdAt && (
                       <span
                         className={`text-[10px] ${
-                          m.sender === userName ? "opacity-80" : "opacity-60"
+                          isMe ? "text-pink-200/80" : "text-slate-400"
                         }`}
-                        title={new Date(m.createdAt).toLocaleString()}
                       >
                         {fmtTime(m.createdAt)}
                       </span>
                     )}
-                    {/* copy on hover */}
+
+                    {/* Quick copy on hover */}
                     <button
-                      className={`ml-auto hidden group-hover:inline-block text-[10px] px-1 py-0.5 rounded ${
-                        m.sender === userName
-                          ? "bg-white/20"
-                          : "bg-black/10 dark:bg-white/10"
+                      onClick={() => handleCopyMessage(messageId, m.content)}
+                      className={`ml-auto opacity-0 group-hover:opacity-100 p-0.5 rounded transition ${
+                        isMe ? "hover:bg-white/20" : "hover:bg-white/10"
                       }`}
-                      onClick={() => navigator.clipboard.writeText(m.content)}
-                      title="Copy message"
+                      title="Copy text"
                     >
-                      Copy
+                      {copiedId === messageId ? (
+                        <Check className="w-3 h-3 text-emerald-300" />
+                      ) : (
+                        <Copy className="w-3 h-3 text-slate-300" />
+                      )}
                     </button>
                   </div>
-                  <p className="mt-1 text-sm whitespace-pre-wrap break-words">
+
+                  <p className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap break-words">
                     {m.content}
                   </p>
                 </div>
 
-                {/* Avatar on right for you */}
-                {m.sender === userName && (
+                {isMe && (
                   <div
-                    className={`w-7 h-7 rounded-full text-white grid place-items-center text-[10px] flex-shrink-0 ${getUserColor(
-                      m.sender
-                    )}`}
-                    title={m.sender}
+                    className={`w-7 h-7 rounded-full bg-gradient-to-tr ${getUserColor(
+                      userName
+                    )} text-white font-bold grid place-items-center text-[10px] shrink-0 shadow-sm`}
+                    title={userName}
                   >
-                    {initials(m.sender)}
+                    {initials(userName)}
                   </div>
                 )}
               </div>
-            </div>
-          )
+            );
+          })
         )}
 
         {/* Typing indicator */}
-        {!!typingUsers.length && (
-          <div className="text-[11px] text-slate-500 italic px-2">
-            {typingUsers.slice(0, 3).join(", ")}
-            {typingUsers.length > 3 ? " and others" : ""} typing…
+        {typingUsers.length > 0 && (
+          <div className="text-[11px] text-pink-400 italic px-2 animate-pulse">
+            {typingUsers.slice(0, 2).join(", ")}
+            {typingUsers.length > 2 ? " and others" : ""} typing…
           </div>
         )}
       </div>
 
-      {/* Input */}
-      <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111]">
+      {/* Quick Reaction Bar */}
+      <div className="px-3 py-1.5 border-t border-white/10 bg-slate-950/40 flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+        <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 mr-1 shrink-0">
+          React:
+        </span>
+        {QUICK_REACTIONS.map((emoji) => (
+          <button
+            key={emoji}
+            onClick={() => send(emoji)}
+            className="px-2 py-0.5 rounded-lg text-sm bg-white/5 hover:bg-pink-500/20 hover:scale-110 active:scale-95 border border-white/5 transition"
+            title={`Send ${emoji}`}
+          >
+            {emoji}
+          </button>
+        ))}
+      </div>
+
+      {/* Message Input Box */}
+      <div className="p-3 border-t border-white/10 bg-slate-950/80">
         <div className="flex items-end gap-2">
           <textarea
             ref={inputRef}
@@ -290,37 +299,36 @@ export default function ChatBox({
                 if (!overLimit) send();
               }
             }}
-            placeholder="Message…"
+            placeholder="Type a message or press Enter…"
             rows={1}
-            className={`flex-1 resize-none border px-3 py-2 rounded-lg focus:ring-2 focus:ring-pink-500 dark:bg-gray-900 dark:text-gray-100 ${
-              overLimit ? "border-red-400 focus:ring-red-500" : ""
+            className={`flex-1 resize-none rounded-xl border border-white/10 bg-slate-900/90 px-3.5 py-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-500 shadow-inner outline-none transition focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 ${
+              overLimit ? "border-red-500 focus:ring-red-500/20" : ""
             }`}
           />
           <button
-            onClick={send}
+            onClick={() => send()}
             disabled={!msg.trim() || overLimit}
-            className={`px-4 py-2 rounded-lg text-white transition ${
+            className={`h-[38px] px-3.5 rounded-xl text-white font-medium inline-flex items-center justify-center transition-all shadow-md shadow-pink-600/20 ${
               !msg.trim() || overLimit
-                ? "bg-pink-400/60 cursor-not-allowed"
-                : "bg-pink-600 hover:bg-pink-700"
+                ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                : "bg-pink-600 hover:bg-pink-500 active:scale-95"
             }`}
             title="Send"
           >
-            Send
+            <Send className="w-4 h-4" />
           </button>
         </div>
-        <div className="mt-1 flex justify-between text-[11px]">
-          <span className="text-slate-500">
-            Enter ↵ to send · Shift+Enter for newline
-          </span>
+
+        <div className="mt-1.5 flex justify-between text-[10px] text-slate-500 px-1">
+          <span>Enter ↵ to send • Shift+Enter for newline</span>
           <span
-            className={`${
+            className={
               overLimit
-                ? "text-red-500"
+                ? "text-red-400 font-semibold"
                 : nearLimit
-                ? "text-amber-600"
+                ? "text-amber-400"
                 : "text-slate-500"
-            }`}
+            }
           >
             {msg.length}/{maxChars}
           </span>

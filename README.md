@@ -1,51 +1,77 @@
-# 🎉 Watch Party App (Next.js)
+# 🎬 Watch Party (Next.js 15 + React 19 + Supabase)
 
-## 📖 Overview
-This project is a **Watch Party web application** built with **Next.js** where users can **watch YouTube videos together in real-time** and **chat in a shared room**.  
-It provides a fun and interactive way to enjoy content with friends, no matter where they are.  
+A modern, cinema-grade **Watch Party web application** built with **Next.js 15**, **React 19**, **Tailwind CSS**, and **Supabase Realtime**. Watch synchronized YouTube videos with friends in real-time, live chat, and send emoji reactions — no login required.
 
-The app synchronizes video playback across all participants and includes a **live chat feature**, creating a shared virtual theater experience.  
+---
+
+## 🌟 Key Features
+
+- 🎥 **Synchronized YouTube Playback** — Sub-second playback synchronization (play, pause, seek) powered by Supabase Realtime broadcasts.
+- 🔗 **Direct URL & Shorts Support** — Paste any YouTube video URL, `youtu.be` short link, or `/shorts/` link directly, or search via the YouTube API.
+- 👥 **Private & Public Rooms** — Generate 6-digit room codes or share 1-click invite links.
+- 💬 **Live Chat & Quick Reactions** — Real-time chat with 1-click emoji reactions (`🍿`, `🔥`, `❤️`, `👏`, `😂`, `🎉`, `😱`, `🥳`).
+- 👑 **Host Control & Presence** — View who's online with avatar indicators and host/leader control toggle.
+- 🎭 **Theater Mode** — Expand video container to full width for an immersive cinematic experience.
+- 🧪 **Comprehensive Test Suite** — Fully covered with Vitest and React Testing Library tests.
 
 ---
 
 ## ⚙️ Tech Stack
-- **Frontend:** [Next.js](https://nextjs.org/) ⚡  
-- **Video Player:** [YouTube Embed / IFrame API](https://developers.google.com/youtube/iframe_api_reference) 🎥  
-- **Chat System:** WebSocket / Real-time Messaging 💬  
-- **Deployment:** [Vercel](https://vercel.com/) 🌍  
+
+- **Framework:** Next.js 15 (App Router, Server Components & Client Hydration)
+- **UI & Styling:** React 19, Tailwind CSS v4, Radix UI, Lucide Icons, Framer Motion
+- **Real-Time Backend:** Supabase Realtime (Presence & Broadcast channels)
+- **Video Player:** `react-youtube` / YouTube IFrame API
+- **Testing:** Vitest, React Testing Library, JSDOM
 
 ---
 
-## 🛠 Features
-- 🎥 **YouTube Video Playback** — Play any YouTube video inside the app.  
-- 🔗 **Shared Rooms** — Invite friends with a room link to join the watch party.  
-- ⏯️ **Synchronized Playback** — Play, pause, and seek are mirrored across all participants.  
-- 💬 **Live Chat** — Chat alongside the video with everyone in the room.  
-- 🌐 **Deployed on Vercel** — Fast and globally available.  
+## 🚀 Getting Started
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/abulhasan-18/Watch-party.git
+cd Watch-party
+```
+
+### 2. Install dependencies
+```bash
+npm install
+```
+
+### 3. Environment Variables
+Create a `.env.local` file in the root directory:
+```env
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+NEXT_PUBLIC_YOUTUBE_API_KEY=your_youtube_api_key
+```
+
+### 4. Run development server
+```bash
+npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-## 🚀 Deployment Link
-- 🔗 **Live Demo:** [Watch Party on Vercel](#)  
+## 🧪 Running Automated Tests
+
+Run the full Vitest test suite:
+```bash
+npm run test
+```
+
+Run tests in watch mode:
+```bash
+npm run test:watch
+```
 
 ---
 
-## 🛠 Development Journey
-### 1. Local Development
-- Built the app with **Next.js** for fast performance and SSR/CSR support.  
-- Integrated **YouTube IFrame Player API** for video playback.  
-- Added **real-time chat** using WebSockets.  
+## 📦 Building for Production
 
-### 2. Cloud Deployment
-- Hosted the **Next.js app on Vercel** for production-ready hosting.  
-- Ensured seamless synchronization between video playback & chat across users.  
-
----
-
-## 📌 How to Run Locally
-1. **Clone repo**  
-   ```bash
-   git clone https://github.com/your-username/watch-party-app.git
-   cd watch-party-app
-   npm install
-   npm run dev
+```bash
+npm run build
+npm run start
+```
