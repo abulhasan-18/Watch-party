@@ -1,4 +1,4 @@
-// app/layout.tsx
+import "@/lib/polyfill";
 import "./globals.css";
 import type { Metadata, Viewport } from "next";
 import ToasterProvider from "@/components/providers/ToasterProvider";
