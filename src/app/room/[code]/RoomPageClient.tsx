@@ -44,6 +44,14 @@ type PresenceUser = {
   joinedAt?: number;
 };
 
+type RawPresence = {
+  clientId?: string;
+  key?: string;
+  name?: string;
+  role?: "host" | "guest";
+  joinedAt?: number;
+};
+
 const LS_ROOM_META = "wp.roomMeta";
 const LS_CLIENT_ID = "wp.clientId";
 const CHAT_BURST_LIMIT = 6;
@@ -88,7 +96,6 @@ export default function RoomPageClient({
   const [clientId, setClientId] = useState("");
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
   const [channelReady, setChannelReady] = useState(false);
-  // Default to false (Free control) so any user can control video without confusion, unless host locks it
   const [leaderOnlyControl, setLeaderOnlyControl] = useState<boolean>(false);
 
   // Tabs: "chat" | "participants"
@@ -98,6 +105,31 @@ export default function RoomPageClient({
 
   // mobile chat drawer
   const [showChatMobile, setShowChatMobile] = useState(false);
+
+  // Refs for tracking mutable values across WebSocket callbacks without channel teardowns
+  const nowPlayingRef = useRef(nowPlaying);
+  const userNameRef = useRef(userName);
+  const userRoleRef = useRef(userRole);
+  const leaderOnlyControlRef = useRef(leaderOnlyControl);
+  const isLeaderRef = useRef(false);
+  const leaderIdRef = useRef("");
+  const joinedAtRef = useRef(Date.now());
+
+  useEffect(() => {
+    nowPlayingRef.current = nowPlaying;
+  }, [nowPlaying]);
+
+  useEffect(() => {
+    userNameRef.current = userName;
+  }, [userName]);
+
+  useEffect(() => {
+    userRoleRef.current = userRole;
+  }, [userRole]);
+
+  useEffect(() => {
+    leaderOnlyControlRef.current = leaderOnlyControl;
+  }, [leaderOnlyControl]);
 
   // Derived host determination
   const hostUser = useMemo(() => {
@@ -117,6 +149,31 @@ export default function RoomPageClient({
   const leaderId = useMemo(() => {
     return hostUser?.clientId || (isLeader ? clientId : "");
   }, [hostUser, isLeader, clientId]);
+
+  useEffect(() => {
+    isLeaderRef.current = isLeader;
+    leaderIdRef.current = leaderId;
+  }, [isLeader, leaderId]);
+
+  // Ensure current user is always included in displayed participants
+  const displayedUsers = useMemo(() => {
+    if (!clientId) return presenceUsers;
+    const seen = new Set(presenceUsers.map((u) => u.clientId));
+    if (!seen.has(clientId)) {
+      return [
+        {
+          clientId,
+          name: userName || "Guest",
+          role: userRole,
+          joinedAt: joinedAtRef.current,
+        },
+        ...presenceUsers,
+      ];
+    }
+    return presenceUsers;
+  }, [presenceUsers, clientId, userName, userRole]);
+
+  const presenceCount = displayedUsers.length;
 
   // player refs / sync
   const videoPlayerRef = useRef<VideoPlayerHandle | null>(null);
@@ -140,9 +197,17 @@ export default function RoomPageClient({
       const raw = localStorage.getItem(LS_ROOM_META);
       if (raw) {
         const meta = JSON.parse(raw);
-        if (meta?.name) setUserName(String(meta.name).slice(0, 40));
-        else setAskName(true);
-        if (meta?.role === "host") setUserRole("host");
+        if (meta?.name) {
+          const clean = String(meta.name).slice(0, 40);
+          setUserName(clean);
+          userNameRef.current = clean;
+        } else {
+          setAskName(true);
+        }
+        if (meta?.role === "host") {
+          setUserRole("host");
+          userRoleRef.current = "host";
+        }
       } else {
         setAskName(true);
       }
@@ -158,18 +223,18 @@ export default function RoomPageClient({
 
   // ===== Helpers =====
   const bumpLastActive = useCallback(async () => {
-    if (!isLeader) return;
+    if (!isLeaderRef.current) return;
     try {
       await supabase
         .from("rooms")
         .update({ last_active: new Date().toISOString() })
         .eq("id", code);
     } catch {}
-  }, [isLeader, code]);
+  }, [code]);
 
   const setActiveFlag = useCallback(
     async (active: boolean) => {
-      if (!isLeader) return;
+      if (!isLeaderRef.current) return;
       try {
         await supabase
           .from("rooms")
@@ -177,7 +242,7 @@ export default function RoomPageClient({
           .eq("id", code);
       } catch {}
     },
-    [isLeader, code]
+    [code]
   );
 
   const sanitizeName = (s: string) =>
@@ -204,16 +269,15 @@ export default function RoomPageClient({
   }
 
   function flushPendingChat() {
-    if (!channelReady || !pendingChatRef.current.length) return;
+    if (!channelRef.current || !pendingChatRef.current.length) return;
     const ch = channelRef.current;
-    if (!ch) return;
     for (const msg of pendingChatRef.current) {
       ch.send({ type: "broadcast", event: "chat", payload: msg });
     }
     pendingChatRef.current = [];
   }
 
-  // ===== Supabase Realtime subscription =====
+  // ===== Supabase Realtime subscription (Runs once per client & room code) =====
   useEffect(() => {
     if (!clientId || !code) return;
 
@@ -224,8 +288,9 @@ export default function RoomPageClient({
 
     // presence join
     ch.on("presence", { event: "join" }, ({ newPresences }) => {
-      for (const p of newPresences) {
-        if (p.clientId && p.name && p.clientId !== clientId) {
+      for (const p of newPresences as unknown as RawPresence[]) {
+        const uId = p.clientId || p.key;
+        if (uId && p.name && uId !== clientId) {
           enqueueSystem(`${p.name} joined the room`);
         }
       }
@@ -233,8 +298,9 @@ export default function RoomPageClient({
 
     // presence leave
     ch.on("presence", { event: "leave" }, ({ leftPresences }) => {
-      for (const p of leftPresences) {
-        if (p.clientId && p.name && p.clientId !== clientId) {
+      for (const p of leftPresences as unknown as RawPresence[]) {
+        const uId = p.clientId || p.key;
+        if (uId && p.name && uId !== clientId) {
           enqueueSystem(`${p.name} left the room`);
         }
       }
@@ -242,25 +308,38 @@ export default function RoomPageClient({
 
     // presence sync
     ch.on("presence", { event: "sync" }, () => {
-      const state = ch.presenceState() as Record<
-        string,
-        Array<{ clientId: string; name: string; role?: "host" | "guest"; joinedAt?: number }>
-      >;
+      const state = ch.presenceState();
       const userList: PresenceUser[] = [];
       const seen = new Set<string>();
 
-      for (const presences of Object.values(state)) {
-        for (const user of presences) {
-          if (user.clientId && !seen.has(user.clientId)) {
-            seen.add(user.clientId);
+      for (const [key, presences] of Object.entries(state)) {
+        if (!Array.isArray(presences)) continue;
+        for (const raw of presences as unknown as RawPresence[]) {
+          const uId = raw.clientId || key;
+          const uName = raw.name || "Guest";
+          const uRole = raw.role || "guest";
+          const uJoinedAt = raw.joinedAt || 0;
+
+          if (uId && !seen.has(uId)) {
+            seen.add(uId);
             userList.push({
-              clientId: user.clientId,
-              name: user.name || "Guest",
-              role: user.role || "guest",
-              joinedAt: user.joinedAt || 0,
+              clientId: uId,
+              name: uName,
+              role: uRole,
+              joinedAt: uJoinedAt,
             });
           }
         }
+      }
+
+      // Always ensure local client is included
+      if (clientId && !seen.has(clientId)) {
+        userList.push({
+          clientId,
+          name: sanitizeName(userNameRef.current) || "Guest",
+          role: userRoleRef.current,
+          joinedAt: joinedAtRef.current,
+        });
       }
 
       setPresenceUsers(userList);
@@ -300,7 +379,14 @@ export default function RoomPageClient({
         title?: string;
         channel?: string;
       };
-      if (leaderOnlyControl && senderId && senderId !== leaderId && !isLeader) return;
+      if (
+        leaderOnlyControlRef.current &&
+        senderId &&
+        senderId !== leaderIdRef.current &&
+        !isLeaderRef.current
+      ) {
+        return;
+      }
 
       isRemoteActionRef.current = true;
       setVideoId(newVid);
@@ -329,8 +415,14 @@ export default function RoomPageClient({
         senderId?: string;
       };
 
-      // Suppress if leader only and sender is not leader
-      if (leaderOnlyControl && senderId && senderId !== leaderId && !isLeader) return;
+      if (
+        leaderOnlyControlRef.current &&
+        senderId &&
+        senderId !== leaderIdRef.current &&
+        !isLeaderRef.current
+      ) {
+        return;
+      }
 
       // Don't re-trigger from own broadcast
       if (senderId === clientId) return;
@@ -356,7 +448,16 @@ export default function RoomPageClient({
 
     // state reply for late joiners
     ch.on("broadcast", { event: "state" }, ({ payload }) => {
-      const { videoId: syncVid, isPlaying, currentTime, at, to, title, channel, leaderOnlyControl: syncControl } = payload as {
+      const {
+        videoId: syncVid,
+        isPlaying,
+        currentTime,
+        at,
+        to,
+        title,
+        channel,
+        leaderOnlyControl: syncControl,
+      } = payload as {
         videoId: string | null;
         isPlaying: boolean;
         currentTime: number;
@@ -398,7 +499,7 @@ export default function RoomPageClient({
 
     // request-state handler
     ch.on("broadcast", { event: "request-state" }, async ({ payload }) => {
-      if (!isLeader) return;
+      if (!isLeaderRef.current) return;
       const { requester } = (payload || {}) as { requester?: string };
       const vid = videoIdRef.current;
       if (!vid) return;
@@ -417,9 +518,9 @@ export default function RoomPageClient({
           currentTime,
           at: Date.now(),
           to: requester || undefined,
-          title: nowPlaying?.title,
-          channel: nowPlaying?.channel,
-          leaderOnlyControl,
+          title: nowPlayingRef.current?.title,
+          channel: nowPlayingRef.current?.channel,
+          leaderOnlyControl: leaderOnlyControlRef.current,
         },
       });
     });
@@ -428,12 +529,12 @@ export default function RoomPageClient({
     ch.subscribe(async (status) => {
       if (status === "SUBSCRIBED") {
         setChannelReady(true);
-        const clean = sanitizeName(userName);
+        const clean = sanitizeName(userNameRef.current) || "Guest";
         await ch.track({
           clientId,
           name: clean,
-          role: userRole,
-          joinedAt: Date.now(),
+          role: userRoleRef.current,
+          joinedAt: joinedAtRef.current,
         });
         ch.send({
           type: "broadcast",
@@ -451,8 +552,7 @@ export default function RoomPageClient({
       ch.unsubscribe();
       channelRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [code, clientId, leaderId, leaderOnlyControl, userName, userRole, isLeader, enqueueSystem]);
+  }, [code, clientId, bumpLastActive, setActiveFlag, enqueueSystem]);
 
   // leader heartbeat
   useEffect(() => {
@@ -520,6 +620,7 @@ export default function RoomPageClient({
     }
     const nextMode = !leaderOnlyControl;
     setLeaderOnlyControl(nextMode);
+    leaderOnlyControlRef.current = nextMode;
     channelRef.current?.send({
       type: "broadcast",
       event: "control-mode",
@@ -534,7 +635,7 @@ export default function RoomPageClient({
 
   const handleSelectVideo = useCallback(
     (item: VideoItem) => {
-      if (leaderOnlyControl && !isLeader) {
+      if (leaderOnlyControlRef.current && !isLeaderRef.current) {
         toast("Room is in Host-Only control mode. Ask the host to change video or switch to Anyone mode.", {
           icon: "🔒",
         });
@@ -583,7 +684,7 @@ export default function RoomPageClient({
         .update({ last_active: new Date().toISOString() })
         .eq("id", code);
     },
-    [code, clientId, isLeader, leaderOnlyControl]
+    [code, clientId]
   );
 
   const handlePlay = useCallback(async () => {
@@ -593,7 +694,7 @@ export default function RoomPageClient({
       return;
     }
 
-    if (leaderOnlyControl && !isLeader) {
+    if (leaderOnlyControlRef.current && !isLeaderRef.current) {
       toast("Room is in Host-Only control mode.", { icon: "🔒" });
       return;
     }
@@ -614,7 +715,7 @@ export default function RoomPageClient({
         senderId: clientId,
       },
     });
-  }, [clientId, isLeader, leaderOnlyControl]);
+  }, [clientId]);
 
   const handlePause = useCallback(async () => {
     // If state change was caused by remote network packet, don't echo back!
@@ -623,7 +724,7 @@ export default function RoomPageClient({
       return;
     }
 
-    if (leaderOnlyControl && !isLeader) {
+    if (leaderOnlyControlRef.current && !isLeaderRef.current) {
       toast("Room is in Host-Only control mode.", { icon: "🔒" });
       return;
     }
@@ -644,7 +745,7 @@ export default function RoomPageClient({
         senderId: clientId,
       },
     });
-  }, [clientId, isLeader, leaderOnlyControl]);
+  }, [clientId]);
 
   const handleSendChat = useCallback(
     (m: { sender: string; content: string }) => {
@@ -656,7 +757,7 @@ export default function RoomPageClient({
         return;
       }
 
-      const cleanSender = sanitizeName(userName) || "Guest";
+      const cleanSender = sanitizeName(userNameRef.current) || "Guest";
       const newMsg: ChatMessage = {
         id: uuid(),
         sender: cleanSender,
@@ -682,7 +783,7 @@ export default function RoomPageClient({
         .update({ last_active: new Date().toISOString() })
         .eq("id", code);
     },
-    [userName, code, channelReady]
+    [code, channelReady]
   );
 
   const saveName = (newName: string, isChange = false) => {
@@ -694,6 +795,7 @@ export default function RoomPageClient({
 
     const old = userName;
     setUserName(trimmed);
+    userNameRef.current = trimmed;
     localStorage.setItem(
       LS_ROOM_META,
       JSON.stringify({ name: trimmed, role: userRole, roomName })
@@ -703,10 +805,29 @@ export default function RoomPageClient({
       channelRef.current?.track({
         clientId,
         name: trimmed,
-        role: userRole,
-        joinedAt: Date.now(),
+        role: userRoleRef.current,
+        joinedAt: joinedAtRef.current,
       });
     } catch {}
+
+    // Immediately update local presence list
+    setPresenceUsers((prev) => {
+      const idx = prev.findIndex((u) => u.clientId === clientId);
+      if (idx >= 0) {
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], name: trimmed };
+        return updated;
+      }
+      return [
+        {
+          clientId,
+          name: trimmed,
+          role: userRole,
+          joinedAt: joinedAtRef.current,
+        },
+        ...prev,
+      ];
+    });
 
     if (isChange) {
       channelRef.current?.send({
@@ -794,7 +915,7 @@ export default function RoomPageClient({
               <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5">
                 <span className="flex items-center gap-1 font-medium">
                   <Users className="w-3 h-3 text-slate-400" />
-                  {presenceUsers.length} Online
+                  {presenceCount} Online
                 </span>
                 <span>•</span>
                 <span className="flex items-center gap-1">
@@ -972,7 +1093,7 @@ export default function RoomPageClient({
                 <Users className="w-3.5 h-3.5" />
                 <span>Who&apos;s Here</span>
                 <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-black/30">
-                  {presenceUsers.length}
+                  {presenceCount}
                 </span>
               </button>
             </div>
@@ -1010,9 +1131,9 @@ export default function RoomPageClient({
             ) : (
               <div className="flex-1 p-4 overflow-y-auto space-y-2.5 scrollbar-thin">
                 <p className="text-[11px] uppercase font-bold tracking-wider text-slate-400 mb-3">
-                  Online Participants ({presenceUsers.length})
+                  Online Participants ({presenceCount})
                 </p>
-                {presenceUsers.map((user) => {
+                {displayedUsers.map((user) => {
                   const userIsLeader = user.clientId === leaderId;
                   const isMe = user.clientId === clientId;
 
@@ -1061,7 +1182,7 @@ export default function RoomPageClient({
               <div className="flex items-center gap-2">
                 <span className="text-sm font-bold text-white">Room Chat & Users</span>
                 <span className="px-2 py-0.5 rounded-full text-xs bg-pink-500/20 text-pink-400 font-semibold">
-                  {presenceUsers.length} online
+                  {presenceCount} online
                 </span>
               </div>
               <Button
